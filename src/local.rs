@@ -122,7 +122,7 @@ impl Local {
 
         // Build the query to search for all mail in our maildir.
         let all_mail_query = if relative_mail_dir.as_os_str().is_empty() {
-            "*".to_string()
+            "".to_string()
         } else {
             format!("path:\"{}/**\"", relative_mail_dir.to_str().unwrap())
         };
@@ -168,12 +168,17 @@ impl Local {
 
     /// Return all `Email`s that mujmap owns which were modified since the given database revision.
     pub fn all_emails_since(&self, last_revision: u64) -> Result<HashMap<jmap::Id, Email>> {
-        self.query(&format!(
-            "{} and lastmod:{}..{}",
-            self.all_mail_query,
-            last_revision,
-            self.revision()
-        ))
+        let query = if self.all_mail_query.is_empty() {
+            format!("lastmod:{}..{}", last_revision, self.revision())
+        } else {
+            format!(
+                "{} and lastmod:{}..{}",
+                self.all_mail_query,
+                last_revision,
+                self.revision()
+            )
+        };
+        self.query(&query)
     }
 
     /// Return all tags in the database.
