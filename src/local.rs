@@ -65,7 +65,7 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Email {
     pub id: jmap::Id,
     pub blob_id: jmap::Id,

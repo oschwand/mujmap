@@ -403,13 +403,35 @@ pub fn sync(
         latest_state.notmuch_revision,
         args.dry_run,
     )?;
-    let updated_local_emails: HashMap<jmap::Id, local::Email> = local
+    let mut updated_local_emails: HashMap<jmap::Id, local::Email> = local
         .all_emails_since(notmuch_revision)
         .map_err(|source| Error::IndexLocalUpdatedEmails { source })?
         .into_iter()
         // Filter out emails that were destroyed on the server.
         .filter(|(id, _)| !destroyed_ids.contains(id))
         .collect();
+
+    // Also include any local email that has a tag mapped to a configured custom keyword but
+    // isn't already queued for update. This ensures that when a custom keyword mapping is
+    // added to the config, existing emails with the corresponding notmuch tag get the JMAP
+    // keyword pushed to the server even though the email itself hasn't changed since the last
+    // sync.
+    if !config.tags.custom_keywords.is_empty() {
+        let custom_keyword_tags: HashSet<&str> = config
+            .tags
+            .custom_keywords
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        for (id, email) in &local_emails {
+            if !updated_local_emails.contains_key(id)
+                && !destroyed_ids.contains(id)
+                && email.tags.iter().any(|t| custom_keyword_tags.contains(t.as_str()))
+            {
+                updated_local_emails.insert(id.clone(), email.clone());
+            }
+        }
+    }
 
     if pull {
         stdout
