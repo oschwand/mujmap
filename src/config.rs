@@ -30,7 +30,7 @@ pub enum Error {
     #[error("`directory_separator' must not be empty")]
     EmptyDirectorySeparator {},
 
-    #[error("Custom keyword `{keyword}' for tag `{tag}' is invalid; keywords must start with `$' and use lowercase [a-z0-9_-] only")]
+    #[error("Custom keyword `{keyword}' for tag `{tag}' is invalid; keywords must start with `$' and use printable ASCII characters only (excluding space, `(`, `)`, `{{`, `\\`, `\"`, `%`, `*`, `]`)")]
     InvalidCustomKeyword { tag: String, keyword: String },
 
     #[error("Duplicate custom keyword mapping for `{keyword}'")]
@@ -211,7 +211,9 @@ pub struct Tags {
 
     /// Mapping of notmuch tag to JMAP keyword.
     ///
-    /// Keywords must start with `$` and use lowercase [a-z0-9_-] only.
+    /// Keywords must start with `$` and consist of printable ASCII characters,
+    /// excluding the IMAP atom-special characters `(`, `)`, `{`, `\`, `"`, `%`, `*`, `]`,
+    /// and space. For example, `$label:urgent` is a valid keyword.
     #[serde(default = "Default::default")]
     pub custom_keywords: HashMap<String, String>,
 }
@@ -296,10 +298,15 @@ fn is_valid_custom_keyword(keyword: &str) -> bool {
     let Some(rest) = keyword.strip_prefix('$') else {
         return false;
     };
+    // Keywords follow IMAP atom rules (RFC 3501): printable ASCII (0x21-0x7E)
+    // excluding atom-specials: ( ) { \ " % * ] and space.
+    // This allows characters such as `:` used in server-defined keywords like `$label:urgent`.
     !rest.is_empty()
-        && rest
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        && rest.chars().all(|c| {
+            c.is_ascii()
+                && !c.is_ascii_control()
+                && !matches!(c, ' ' | '(' | ')' | '{' | '\\' | '"' | '%' | '*' | ']')
+        })
 }
 
 fn default_lowercase() -> bool {
@@ -425,8 +432,12 @@ mod tests {
     fn custom_keyword_format_is_validated() {
         assert!(is_valid_custom_keyword("$foo"));
         assert!(is_valid_custom_keyword("$foo-1_bar"));
+        assert!(is_valid_custom_keyword("$label:urgent"));
+        assert!(is_valid_custom_keyword("$label:my.label+1"));
         assert!(!is_valid_custom_keyword("foo"));
-        assert!(!is_valid_custom_keyword("$Foo"));
+        assert!(!is_valid_custom_keyword("$Foo("));
+        assert!(!is_valid_custom_keyword("$foo bar"));
+        assert!(!is_valid_custom_keyword("$foo]"));
     }
 
     #[test]
