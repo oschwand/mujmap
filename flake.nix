@@ -23,24 +23,24 @@
       prefix = "nix/";
     };
     packages = builtins.listToAttrs (map (system: {
-        name = system;
-        value = bp.packages.${system} // {default = bp.packages.${system}.mujmap;};
-      })
-      systems);
+      name = system;
+      value = bp.packages.${system} // {default = bp.packages.${system}.mujmap;};
+    })
+    systems);
     apps = builtins.listToAttrs (map (system: let
-        mujmap = bp.packages.${system}.mujmap;
-        app = {
-          type = "app";
-          program = "${mujmap}/bin/mujmap";
-        };
-      in {
-        name = system;
-        value = {
-          mujmap = app;
-          default = app;
-        };
-      })
-      systems);
+      mujmap = bp.packages.${system}.mujmap;
+      app = {
+        type = "app";
+        program = "${mujmap}/bin/mujmap";
+      };
+    in {
+      name = system;
+      value = {
+        mujmap = app;
+        default = app;
+      };
+    })
+    systems);
   in
     bp
     // {
