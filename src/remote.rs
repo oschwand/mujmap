@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     config::{self, Config},
-    jmap::{self, EmailKeyword, Id, MailboxRole, State},
+    jmap::{self, Id, MailboxRole, State},
     local,
 };
 use itertools::Itertools;
@@ -947,14 +947,7 @@ impl Remote {
         let updates = local_emails
             .iter()
             .flat_map(|(id, local_email)| {
-                let mut patch = HashMap::new();
-                fn as_value(b: bool) -> Value {
-                    if b {
-                        Value::Bool(true)
-                    } else {
-                        Value::Null
-                    }
-                }
+                let mut patch: HashMap<String, Value> = HashMap::new();
 
                 // The remote email may have been destroyed.
                 let remote_email = match remote_emails.get(id) {
@@ -962,38 +955,11 @@ impl Remote {
                     None => return None,
                 };
 
-                // Keywords.
-                patch.insert(
-                    "keywords/$draft",
-                    as_value(local_email.tags.contains("draft")),
-                );
-                patch.insert(
-                    "keywords/$seen",
-                    as_value(!local_email.tags.contains("unread")),
-                );
-                patch.insert(
-                    "keywords/$flagged",
-                    as_value(local_email.tags.contains("flagged")),
-                );
-                patch.insert(
-                    "keywords/$answered",
-                    as_value(local_email.tags.contains("replied")),
-                );
-                patch.insert(
-                    "keywords/$forwarded",
-                    as_value(local_email.tags.contains("passed")),
-                );
-                if mailboxes.roles.spam.is_none() && !tags_config.spam.is_empty() {
-                    let spam = local_email.tags.contains(&tags_config.spam);
-                    patch.insert("keywords/$junk", as_value(spam));
-                    patch.insert("keywords/$notjunk", as_value(!spam));
-                }
-                if !tags_config.phishing.is_empty() {
-                    patch.insert(
-                        "keywords/$phishing",
-                        as_value(local_email.tags.contains(&tags_config.phishing)),
-                    );
-                }
+                patch.extend(build_keyword_patch(
+                    &local_email.tags,
+                    mailboxes,
+                    tags_config,
+                ));
                 // Set mailboxes.
                 // TODO: eliminate clone here?
                 // Include all ignored mailboxes which the remote email is already included in.
@@ -1015,10 +981,10 @@ impl Remote {
                 if new_mailboxes.is_empty() {
                     new_mailboxes.insert(mailboxes.archive_id.0.clone(), Value::Bool(true));
                 }
-                patch.insert("mailboxIds", Value::Object(new_mailboxes));
+                patch.insert("mailboxIds".to_string(), Value::Object(new_mailboxes));
                 Some(Ok((id, patch)))
             })
-            .collect::<Result<HashMap<&Id, HashMap<&str, Value>>>>()?;
+            .collect::<Result<HashMap<&Id, HashMap<String, Value>>>>()?;
         debug!("Built patch for remote: {:?}", updates);
 
         // Send it off into cyberspace~
@@ -1096,10 +1062,13 @@ impl Remote {
         let sent_mailbox_patch = format!("mailboxIds/{}", sent_mailbox_id.0);
 
         // TODO: Set $answered and $forwarded properties here?
-        let mut on_success_update_email = HashMap::from([("keywords/$draft", Value::Null)]);
+        let mut on_success_update_email = HashMap::from([(
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_DRAFT),
+            Value::Null,
+        )]);
         if draft_mailbox_id != sent_mailbox_id {
-            on_success_update_email.insert(&draft_mailbox_patch, Value::Null);
-            on_success_update_email.insert(&sent_mailbox_patch, Value::Bool(true));
+            on_success_update_email.insert(draft_mailbox_patch.clone(), Value::Null);
+            on_success_update_email.insert(sent_mailbox_patch.clone(), Value::Bool(true));
         }
 
         let account_id = &self.session.primary_accounts.mail;
@@ -1123,8 +1092,8 @@ impl Remote {
                                 blob_id,
                                 mailbox_ids: HashMap::from([(draft_mailbox_id, true)]),
                                 keywords: HashMap::from([
-                                    (EmailKeyword::Draft, true),
-                                    (EmailKeyword::Seen, true),
+                                    (jmap::EMAIL_KEYWORD_DRAFT.to_string(), true),
+                                    (jmap::EMAIL_KEYWORD_SEEN.to_string(), true),
                                 ]),
                             },
                         )]),
@@ -1319,7 +1288,8 @@ pub struct Email {
     pub blob_id: Id,
     pub keywords: HashSet<jmap::EmailKeyword>,
     pub mailbox_ids: HashSet<Id>,
-    pub tags: HashSet<String>,
+    pub builtin_keyword_tags: HashSet<String>,
+    pub custom_keyword_tags: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -1343,7 +1313,7 @@ impl Email {
         let keywords: HashSet<jmap::EmailKeyword> = jmap_email
             .keywords
             .into_iter()
-            .filter(|(k, v)| *v && *k != jmap::EmailKeyword::Unknown)
+            .filter(|(_, v)| *v)
             .map(|(k, _)| k)
             .collect();
         let mailbox_ids = jmap_email
@@ -1355,54 +1325,29 @@ impl Email {
 
         // Keywords. Consider *only* keywords which are not explicitly disabled by the config and
         // are not already covered by a mailbox.
-        fn none_if_empty(s: &str) -> Option<&str> {
-            if s.is_empty() {
-                None
-            } else {
-                Some(s)
-            }
-        }
-        let mut tags = HashSet::new();
+        let mut builtin_keyword_tags = HashSet::new();
+        let mut custom_keyword_tags = HashSet::new();
         for keyword in &keywords {
-            if let Some(tag) = match keyword {
-                EmailKeyword::Answered => Some("replied"),
-                EmailKeyword::Draft => {
-                    if mailboxes.roles.draft.is_some() {
-                        None
-                    } else {
-                        Some("draft")
-                    }
-                }
-                EmailKeyword::Flagged => {
-                    if mailboxes.roles.flagged.is_some() {
-                        None
-                    } else {
-                        Some("flagged")
-                    }
-                }
-                EmailKeyword::Forwarded => Some("passed"),
-                EmailKeyword::Important => {
-                    if mailboxes.roles.important.is_some() {
-                        None
-                    } else {
-                        none_if_empty(&tags_config.important)
-                    }
-                }
-                EmailKeyword::Phishing => none_if_empty(&tags_config.phishing),
-                _ => None,
-            } {
-                tags.insert(tag.to_string());
+            if let Some(tag) = keyword_to_builtin_tag(keyword, mailboxes, tags_config) {
+                builtin_keyword_tags.insert(tag.to_string());
+            }
+            if let Some((tag, _)) = tags_config
+                .custom_keywords
+                .iter()
+                .find(|(_, configured_keyword)| keyword == *configured_keyword)
+            {
+                custom_keyword_tags.insert(tag.clone());
             }
         }
-        if !keywords.contains(&EmailKeyword::Seen) {
-            tags.insert("unread".to_string());
+        if !keywords.contains(jmap::EMAIL_KEYWORD_SEEN) {
+            builtin_keyword_tags.insert("unread".to_string());
         }
         if mailboxes.roles.spam.is_none()
             && !tags_config.spam.is_empty()
-            && keywords.contains(&EmailKeyword::Junk)
-            && !keywords.contains(&EmailKeyword::NotJunk)
+            && keywords.contains(jmap::EMAIL_KEYWORD_JUNK)
+            && !keywords.contains(jmap::EMAIL_KEYWORD_NOT_JUNK)
         {
-            tags.insert(tags_config.spam.clone());
+            builtin_keyword_tags.insert(tags_config.spam.clone());
         }
 
         Self {
@@ -1410,9 +1355,117 @@ impl Email {
             blob_id: jmap_email.blob_id,
             keywords,
             mailbox_ids,
-            tags,
+            builtin_keyword_tags,
+            custom_keyword_tags,
         }
     }
+}
+
+fn keyword_to_builtin_tag<'a>(
+    keyword: &str,
+    mailboxes: &Mailboxes,
+    tags_config: &'a config::Tags,
+) -> Option<&'a str> {
+    fn none_if_empty(s: &str) -> Option<&str> {
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    match keyword {
+        jmap::EMAIL_KEYWORD_ANSWERED => Some("replied"),
+        jmap::EMAIL_KEYWORD_DRAFT => {
+            if mailboxes.roles.draft.is_some() {
+                None
+            } else {
+                Some("draft")
+            }
+        }
+        jmap::EMAIL_KEYWORD_FLAGGED => {
+            if mailboxes.roles.flagged.is_some() {
+                None
+            } else {
+                Some("flagged")
+            }
+        }
+        jmap::EMAIL_KEYWORD_FORWARDED => Some("passed"),
+        jmap::EMAIL_KEYWORD_IMPORTANT => {
+            if mailboxes.roles.important.is_some() {
+                None
+            } else {
+                none_if_empty(&tags_config.important)
+            }
+        }
+        jmap::EMAIL_KEYWORD_PHISHING => none_if_empty(&tags_config.phishing),
+        _ => None,
+    }
+}
+
+fn build_keyword_patch(
+    local_tags: &HashSet<String>,
+    mailboxes: &Mailboxes,
+    tags_config: &config::Tags,
+) -> HashMap<String, Value> {
+    fn as_value(b: bool) -> Value {
+        if b {
+            Value::Bool(true)
+        } else {
+            Value::Null
+        }
+    }
+
+    let mut patch = HashMap::from([
+        (
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_DRAFT),
+            as_value(local_tags.contains("draft")),
+        ),
+        (
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_SEEN),
+            as_value(!local_tags.contains("unread")),
+        ),
+        (
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_FLAGGED),
+            as_value(local_tags.contains("flagged")),
+        ),
+        (
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_ANSWERED),
+            as_value(local_tags.contains("replied")),
+        ),
+        (
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_FORWARDED),
+            as_value(local_tags.contains("passed")),
+        ),
+    ]);
+
+    if mailboxes.roles.spam.is_none() && !tags_config.spam.is_empty() {
+        let spam = local_tags.contains(&tags_config.spam);
+        patch.insert(
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_JUNK),
+            as_value(spam),
+        );
+        patch.insert(
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_NOT_JUNK),
+            as_value(!spam),
+        );
+    }
+
+    if !tags_config.phishing.is_empty() {
+        patch.insert(
+            format!("keywords/{}", jmap::EMAIL_KEYWORD_PHISHING),
+            as_value(local_tags.contains(&tags_config.phishing)),
+        );
+    }
+
+    for (tag, keyword) in &tags_config.custom_keywords {
+        patch.insert(
+            format!("keywords/{keyword}"),
+            as_value(local_tags.contains(tag)),
+        );
+    }
+
+    patch
 }
 
 fn expect_email_get(
@@ -1547,4 +1600,68 @@ fn map_first_method_error_into_result(
     errors
         .and_then(|map| map.into_iter().next())
         .map_or(Ok(()), |(_, e)| Err(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_keyword_patch, AvailableMailboxRoles, Email, Mailboxes};
+    use crate::{config, jmap};
+    use serde_json::Value;
+    use std::collections::{HashMap, HashSet};
+
+    fn empty_mailboxes() -> Mailboxes {
+        Mailboxes {
+            archive_id: jmap::Id("archive".to_string()),
+            mailboxes_by_id: HashMap::new(),
+            ids_by_tag: HashMap::new(),
+            ignored_ids: HashSet::new(),
+            roles: AvailableMailboxRoles::default(),
+        }
+    }
+
+    #[test]
+    fn pull_maps_custom_keywords_and_preserves_multiple_unknowns() {
+        let mut tags: config::Tags = Default::default();
+        tags.custom_keywords = HashMap::from([
+            ("todo".to_string(), "$todo".to_string()),
+            ("work".to_string(), "$work".to_string()),
+        ]);
+        let mailboxes = empty_mailboxes();
+        let remote_email = Email::from_jmap_email(
+            jmap::Email {
+                id: jmap::Id("email".to_string()),
+                blob_id: jmap::Id("blob".to_string()),
+                keywords: HashMap::from([
+                    ("$todo".to_string(), true),
+                    ("$work".to_string(), true),
+                    (jmap::EMAIL_KEYWORD_FLAGGED.to_string(), true),
+                ]),
+                mailbox_ids: HashMap::new(),
+            },
+            &mailboxes,
+            &tags,
+        );
+
+        assert!(remote_email.custom_keyword_tags.contains("todo"));
+        assert!(remote_email.custom_keyword_tags.contains("work"));
+        assert!(remote_email.builtin_keyword_tags.contains("flagged"));
+        assert!(remote_email.keywords.contains("$todo"));
+        assert!(remote_email.keywords.contains("$work"));
+    }
+
+    #[test]
+    fn push_includes_custom_keyword_patches() {
+        let mailboxes = empty_mailboxes();
+        let mut tags: config::Tags = Default::default();
+        tags.custom_keywords = HashMap::from([
+            ("todo".to_string(), "$todo".to_string()),
+            ("work".to_string(), "$work".to_string()),
+        ]);
+        let local_tags = HashSet::from(["todo".to_string()]);
+
+        let patch = build_keyword_patch(&local_tags, &mailboxes, &tags);
+
+        assert_eq!(patch.get("keywords/$todo"), Some(&Value::Bool(true)));
+        assert_eq!(patch.get("keywords/$work"), Some(&Value::Null));
+    }
 }

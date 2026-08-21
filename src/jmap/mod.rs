@@ -32,26 +32,14 @@ impl fmt::Display for State {
 /// Note that JMAP mandates that these be lowercase.
 ///
 /// See <https://www.iana.org/assignments/imap-jmap-keywords/imap-jmap-keywords.xhtml>.
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
-pub enum EmailKeyword {
-    #[serde(rename = "$draft")]
-    Draft,
-    #[serde(rename = "$seen")]
-    Seen,
-    #[serde(rename = "$flagged")]
-    Flagged,
-    #[serde(rename = "$answered")]
-    Answered,
-    #[serde(rename = "$forwarded")]
-    Forwarded,
-    #[serde(rename = "$junk")]
-    Junk,
-    #[serde(rename = "$notjunk")]
-    NotJunk,
-    #[serde(rename = "$phishing")]
-    Phishing,
-    #[serde(rename = "$important")]
-    Important,
-    #[serde(other)]
-    Unknown,
-}
+pub type EmailKeyword = String;
+
+pub const EMAIL_KEYWORD_DRAFT: &str = "$draft";
+pub const EMAIL_KEYWORD_SEEN: &str = "$seen";
+pub const EMAIL_KEYWORD_FLAGGED: &str = "$flagged";
+pub const EMAIL_KEYWORD_ANSWERED: &str = "$answered";
+pub const EMAIL_KEYWORD_FORWARDED: &str = "$forwarded";
+pub const EMAIL_KEYWORD_JUNK: &str = "$junk";
+pub const EMAIL_KEYWORD_NOT_JUNK: &str = "$notjunk";
+pub const EMAIL_KEYWORD_PHISHING: &str = "$phishing";
+pub const EMAIL_KEYWORD_IMPORTANT: &str = "$important";

@@ -158,7 +158,7 @@ pub enum MethodCall<'a> {
         /// this is equivalent to a creation-reference, so the id will be the creation id prefixed
         /// with a "#".)
         #[serde(skip_serializing_if = "Option::is_none")]
-        on_success_update_email: Option<HashMap<&'a Id, HashMap<&'a str, Value>>>,
+        on_success_update_email: Option<HashMap<&'a Id, HashMap<String, Value>>>,
     },
 }
 
@@ -290,7 +290,7 @@ pub struct MethodCallSet<'a, C> {
     /// `PatchObject`. The client may choose to optimise network usage by just sending the diff or
     /// may send the whole object; the server processes it the same either way.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub update: Option<HashMap<&'a Id, HashMap<&'a str, Value>>>,
+    pub update: Option<HashMap<&'a Id, HashMap<String, Value>>>,
     /// A list of ids for `Foo` objects to permanently delete, or `None` if no objects are to be
     /// destroyed.
     #[serde(skip_serializing_if = "Option::is_none")]

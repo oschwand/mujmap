@@ -191,3 +191,14 @@ password_command = "pass example@fastmail.com"
 ## If set to an empty string, this keyword is not synchronized with a tag.
 
 # phishing = "phishing"
+
+## Map notmuch tags to custom JMAP keywords.
+##
+## Each key is a notmuch tag and each value is a JMAP keyword. Keywords must
+## start with `$` and use lowercase [a-z0-9_-] only.
+##
+## Collisions with built-in keyword mappings are not allowed.
+##
+## [tags.custom_keywords]
+## todo = "$todo"
+## project_work = "$project-work"

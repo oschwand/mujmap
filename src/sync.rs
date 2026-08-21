@@ -515,14 +515,18 @@ pub fn sync(
                         Error::Programmer {}
                     })?;
 
-                    // Add mailbox tags
-                    let mut tags: HashSet<&str> =
-                        remote_email.tags.iter().map(|s| s.as_str()).collect();
+                    // Tag precedence while pulling from remote:
+                    // mailbox-derived tags > built-in keyword tags > custom keyword tags.
+                    // For equal tag names this is naturally idempotent, so we encode precedence as
+                    // merge order.
+                    let mut tags: HashSet<&str> = HashSet::new();
                     for id in &remote_email.mailbox_ids {
                         if let Some(mailbox) = mailboxes.mailboxes_by_id.get(id) {
                             tags.insert(&mailbox.tag);
                         }
                     }
+                    tags.extend(remote_email.builtin_keyword_tags.iter().map(|s| s.as_str()));
+                    tags.extend(remote_email.custom_keyword_tags.iter().map(|s| s.as_str()));
 
                     local
                         .update_email_tags(local_email, tags)
@@ -623,6 +627,7 @@ pub fn sync(
 
     if !args.dry_run {
         // Ensure that for every tag, there exists a corresponding mailbox.
+        let builtin_keyword_tags = config.tags.builtin_keyword_tags();
         let tags_with_missing_mailboxes: Vec<String> = local
             .all_tags()
             .map_err(|source| Error::IndexTags { source })?
@@ -630,17 +635,8 @@ pub fn sync(
                 let tag = tag.as_str();
                 // Any tags which *can* be mapped to a keyword do not require a mailbox.
                 // Additionally, automatic tags are never mapped to mailboxes.
-                if [
-                    "draft",
-                    "flagged",
-                    "passed",
-                    "replied",
-                    "unread",
-                    &config.tags.spam,
-                    &config.tags.important,
-                    &config.tags.phishing,
-                ]
-                .contains(&tag)
+                if builtin_keyword_tags.contains(tag)
+                    || config.tags.custom_keywords.contains_key(tag)
                     || local::AUTOMATIC_TAGS.contains(tag)
                 {
                     false

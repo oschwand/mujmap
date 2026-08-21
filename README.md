@@ -137,6 +137,29 @@ arguments at the end of the message are ignored, and mujmap will warn you.
       message-sendmail-extra-arguments '("-C" "/path/to/mujmap/maildir" "send"))
 ```
 
+### Custom keyword mappings
+You can map notmuch tags to custom JMAP keywords using `tags.custom_keywords`
+in `mujmap.toml` (see the example config).
+
+Constraints:
+
+-   JMAP keywords must start with `$` and use lowercase `[a-z0-9_-]` only.
+-   Two tags cannot map to the same JMAP keyword.
+-   Custom mappings cannot reuse built-in keyword mappings.
+
+Behavior:
+
+-   On pull, configured custom keywords are translated into their mapped
+    notmuch tags.
+-   On push, mapped tags set/clear the corresponding remote keyword.
+-   Tags mapped to custom keywords are excluded from mailbox auto-creation.
+
+Migration note:
+
+-   Changing custom mappings after initial synchronization can reclassify tags.
+    Follow the tag-migration warning in `mujmap.toml.example` before changing
+    mappings on an existing setup.
+
 ## Quirks
 -   If you change any of the "tag" options in the config file *after* you
     already have a working setup, be sure to heed the warning in the example

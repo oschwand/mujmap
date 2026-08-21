@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::{
+    collections::{HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
@@ -28,6 +29,20 @@ pub enum Error {
 
     #[error("`directory_separator' must not be empty")]
     EmptyDirectorySeparator {},
+
+    #[error("Custom keyword `{keyword}' for tag `{tag}' is invalid; keywords must start with `$' and use lowercase [a-z0-9_-] only")]
+    InvalidCustomKeyword { tag: String, keyword: String },
+
+    #[error("Duplicate custom keyword mapping for `{keyword}'")]
+    DuplicateCustomKeyword { keyword: String },
+
+    #[error("Custom keyword mapping for tag `{tag}' collides with built-in tag mappings")]
+    CustomKeywordTagCollision { tag: String },
+
+    #[error(
+        "Custom keyword mapping for keyword `{keyword}' collides with built-in keyword mappings"
+    )]
+    CustomKeywordValueCollision { keyword: String },
 
     #[error("Could not execute password command: {}", source)]
     ExecutePasswordCommand { source: io::Error },
@@ -193,6 +208,12 @@ pub struct Tags {
     /// Defaults to `"phishing"`.
     #[serde(default = "default_phishing")]
     pub phishing: String,
+
+    /// Mapping of notmuch tag to JMAP keyword.
+    ///
+    /// Keywords must start with `$` and use lowercase [a-z0-9_-] only.
+    #[serde(default = "Default::default")]
+    pub custom_keywords: HashMap<String, String>,
 }
 
 impl Default for Tags {
@@ -206,8 +227,79 @@ impl Default for Tags {
             spam: default_spam(),
             important: default_important(),
             phishing: default_phishing(),
+            custom_keywords: Default::default(),
         }
     }
+}
+
+impl Tags {
+    fn validate(&self) -> Result<()> {
+        let mut seen_keywords: HashSet<&str> = HashSet::new();
+        for (tag, keyword) in &self.custom_keywords {
+            if !is_valid_custom_keyword(keyword) {
+                Err(Error::InvalidCustomKeyword {
+                    tag: tag.clone(),
+                    keyword: keyword.clone(),
+                })?;
+            }
+            if !seen_keywords.insert(keyword.as_str()) {
+                Err(Error::DuplicateCustomKeyword {
+                    keyword: keyword.clone(),
+                })?;
+            }
+            if self.builtin_keyword_tags().contains(tag.as_str()) {
+                Err(Error::CustomKeywordTagCollision { tag: tag.clone() })?;
+            }
+            if self.builtin_keywords().contains(keyword.as_str()) {
+                Err(Error::CustomKeywordValueCollision {
+                    keyword: keyword.clone(),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn builtin_keyword_tags(&self) -> HashSet<&str> {
+        [
+            "draft",
+            "unread",
+            "flagged",
+            "replied",
+            "passed",
+            self.spam.as_str(),
+            self.important.as_str(),
+            self.phishing.as_str(),
+        ]
+        .into_iter()
+        .filter(|x| !x.is_empty())
+        .collect()
+    }
+
+    fn builtin_keywords(&self) -> HashSet<&str> {
+        [
+            "$draft",
+            "$seen",
+            "$flagged",
+            "$answered",
+            "$forwarded",
+            "$junk",
+            "$notjunk",
+            "$important",
+            "$phishing",
+        ]
+        .into_iter()
+        .collect()
+    }
+}
+
+fn is_valid_custom_keyword(keyword: &str) -> bool {
+    let Some(rest) = keyword.strip_prefix('$') else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
 fn default_lowercase() -> bool {
@@ -285,6 +377,7 @@ impl Config {
         if config.tags.directory_separator.is_empty() {
             Err(Error::EmptyDirectorySeparator {})?
         };
+        config.tags.validate()?;
         Ok(config)
     }
 
@@ -304,5 +397,87 @@ impl Config {
         let stdout = String::from_utf8(output.stdout)
             .map_err(|source| Error::DecodePasswordCommand { source })?;
         Ok(stdout.trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_custom_keyword, Config, Error};
+    use std::collections::HashMap;
+
+    fn base_config() -> Config {
+        Config {
+            username: "user@example.com".to_string(),
+            password_command: "echo pw".to_string(),
+            fqdn: None,
+            session_url: None,
+            concurrent_downloads: 8,
+            timeout: 5,
+            retries: 5,
+            auto_create_new_mailboxes: true,
+            convert_dos_to_unix: true,
+            cache_dir: None,
+            tags: Default::default(),
+        }
+    }
+
+    #[test]
+    fn custom_keyword_format_is_validated() {
+        assert!(is_valid_custom_keyword("$foo"));
+        assert!(is_valid_custom_keyword("$foo-1_bar"));
+        assert!(!is_valid_custom_keyword("foo"));
+        assert!(!is_valid_custom_keyword("$Foo"));
+    }
+
+    #[test]
+    fn custom_keyword_parses_from_config() {
+        let config: Config = toml::from_str(
+            r#"
+username = "user@example.com"
+password_command = "echo pw"
+
+[tags.custom_keywords]
+todo = "$todo"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.tags.custom_keywords.get("todo"),
+            Some(&"$todo".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_keyword_rejects_builtins() {
+        let mut config = base_config();
+        config
+            .tags
+            .custom_keywords
+            .insert("todo".to_string(), "$seen".to_string());
+        let err = config.tags.validate().unwrap_err();
+        assert!(matches!(err, Error::CustomKeywordValueCollision { .. }));
+    }
+
+    #[test]
+    fn custom_keyword_rejects_builtin_tags() {
+        let mut config = base_config();
+        config
+            .tags
+            .custom_keywords
+            .insert("draft".to_string(), "$todo".to_string());
+        let err = config.tags.validate().unwrap_err();
+        assert!(matches!(err, Error::CustomKeywordTagCollision { .. }));
+    }
+
+    #[test]
+    fn custom_keyword_rejects_duplicate_keyword_targets() {
+        let mut config = base_config();
+        config.tags.custom_keywords = HashMap::from([
+            ("todo".to_string(), "$project".to_string()),
+            ("work".to_string(), "$project".to_string()),
+        ]);
+        let err = config.tags.validate().unwrap_err();
+        assert!(matches!(err, Error::DuplicateCustomKeyword { .. }));
     }
 }
