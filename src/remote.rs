@@ -260,36 +260,43 @@ impl Remote {
     }
 
     fn open_url(session_url: &str, username: &str, password: &str, timeout: u64) -> Result<Self> {
+        fn encode_basic(username: &str, password: &str) -> String {
+            let safe_username = match username.find(':') {
+                Some(idx) => &username[..idx],
+                None => username,
+            };
+            format!(
+                "Basic {}",
+                base64::encode(format!("{safe_username}:{password}"))
+            )
+        }
+
         let agent = ureq::AgentBuilder::new()
             .redirect_auth_headers(ureq::RedirectAuthHeaders::SameHost)
             .timeout(Duration::from_secs(timeout))
             .build();
 
-        match agent.get(session_url).call() {
+        // Always attempt Basic auth on the first request when credentials are available.
+        let basic_authorization = encode_basic(username, password);
+        debug!("sending Basic auth on initial request");
+
+        match agent
+            .get(session_url)
+            .set("Authorization", &basic_authorization)
+            .call()
+        {
             Ok(r) => {
-                // Server returned success without authentication. Surprising, but valid.
                 let session_url = r.get_url().to_string();
                 let session: jmap::Session =
                     r.into_json().map_err(|source| Error::Response { source })?;
                 Ok(Self {
-                    http_wrapper: HttpWrapper::new(None, timeout),
+                    http_wrapper: HttpWrapper::new(Some(basic_authorization), timeout),
                     session_url,
                     session,
                 })
             }
 
             Err(ureq::Error::Status(401, ref r)) => {
-                fn encode_basic(username: &str, password: &str) -> String {
-                    let safe_username = match username.find(':') {
-                        Some(idx) => &username[..idx],
-                        None => username,
-                    };
-                    format!(
-                        "Basic {}",
-                        base64::encode(format!("{safe_username}:{password}"))
-                    )
-                }
-
                 let authorization = match r.header("WWW-Authenticate") {
                     Some(v) if v.starts_with("Basic") => {
                         debug!("server offered Basic auth");
@@ -297,8 +304,8 @@ impl Remote {
                     }
 
                     Some(v) if v.starts_with("Bearer") => {
-                        debug!("server offered Bearer auth");
-                        Some(format!("Bearer {password}"))
+                        debug!("server offered ******");
+                        Some(format!("******"))
                     }
 
                     // Server didn't offer any auth schemes but still requires authentication.
