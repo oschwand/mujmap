@@ -22,9 +22,29 @@
       inherit inputs systems;
       prefix = "nix/";
     };
+    packages = builtins.listToAttrs (map (system: {
+        name = system;
+        value = bp.packages.${system} // {default = bp.packages.${system}.mujmap;};
+      })
+      systems);
+    apps = builtins.listToAttrs (map (system: let
+        mujmap = bp.packages.${system}.mujmap;
+        app = {
+          type = "app";
+          program = "${mujmap}/bin/mujmap";
+        };
+      in {
+        name = system;
+        value = {
+          mujmap = app;
+          default = app;
+        };
+      })
+      systems);
   in
     bp
     // {
+      inherit packages apps;
       overlays.default = final: _prev: bp.mkPackagesFor final;
     };
 }
