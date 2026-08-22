@@ -411,11 +411,16 @@ pub fn sync(
         .filter(|(id, _)| !destroyed_ids.contains(id))
         .collect();
 
-    // Also include any local email that has a tag mapped to a configured custom keyword but
+    // Also collect any local email that has a tag mapped to a configured custom keyword but
     // isn't already queued for update. This ensures that when a custom keyword mapping is
     // added to the config, existing emails with the corresponding notmuch tag get the JMAP
     // keyword pushed to the server even though the email itself hasn't changed since the last
     // sync.
+    //
+    // These are tracked separately from `updated_local_emails` so that they are still updated
+    // when pulled from the remote: an email with a custom keyword tag that hasn't been modified
+    // locally should still receive remote tag changes (e.g. a label being removed server-side).
+    let mut custom_keyword_preseeded_emails: HashMap<jmap::Id, local::Email> = HashMap::new();
     if !config.tags.custom_keywords.is_empty() {
         let custom_keyword_tags: HashSet<&str> = config
             .tags
@@ -428,7 +433,7 @@ pub fn sync(
                 && !destroyed_ids.contains(id)
                 && email.tags.iter().any(|t| custom_keyword_tags.contains(t.as_str()))
             {
-                updated_local_emails.insert(id.clone(), email.clone());
+                custom_keyword_preseeded_emails.insert(id.clone(), email.clone());
             }
         }
     }
@@ -682,19 +687,27 @@ pub fn sync(
         }
     }
 
+    // Merge preseeded emails into the push set (but not into updated_local_emails, so they
+    // are not excluded from the pull phase above).
+    let emails_to_push: HashMap<jmap::Id, local::Email> = updated_local_emails
+        .iter()
+        .chain(custom_keyword_preseeded_emails.iter())
+        .map(|(id, email)| (id.clone(), email.clone()))
+        .collect();
+
     // Update remote messages.
     stdout
         .set_color(&info_color_spec)
         .map_err(|source| Error::Log { source })?;
     write!(stdout, "Applying changes to JMAP server...").map_err(|source| Error::Log { source })?;
     stdout.reset().map_err(|source| Error::Log { source })?;
-    writeln!(stdout, " ({} changed)", updated_local_emails.len())
+    writeln!(stdout, " ({} changed)", emails_to_push.len())
         .map_err(|source| Error::Log { source })?;
     stdout.flush().map_err(|source| Error::Log { source })?;
 
     if !args.dry_run {
         remote
-            .update(&updated_local_emails, &mailboxes, &config.tags)
+            .update(&emails_to_push, &mailboxes, &config.tags)
             .map_err(|source| Error::PushChanges { source })?;
     }
 
