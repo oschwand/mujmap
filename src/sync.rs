@@ -689,9 +689,17 @@ pub fn sync(
 
     // Merge preseeded emails into the push set (but not into updated_local_emails, so they
     // are not excluded from the pull phase above).
+    //
+    // Exclude any preseeded email that was also updated remotely: we just pulled the server's
+    // authoritative state for those, so pushing them again (with the stale pre-pull snapshot
+    // tags) would re-add labels that were intentionally removed on the server.
     let emails_to_push: HashMap<jmap::Id, local::Email> = updated_local_emails
         .iter()
-        .chain(custom_keyword_preseeded_emails.iter())
+        .chain(
+            custom_keyword_preseeded_emails
+                .iter()
+                .filter(|(id, _)| !remote_emails.contains_key(id)),
+        )
         .map(|(id, email)| (id.clone(), email.clone()))
         .collect();
 
