@@ -403,7 +403,7 @@ pub fn sync(
         latest_state.notmuch_revision,
         args.dry_run,
     )?;
-    let updated_local_emails: HashMap<jmap::Id, local::Email> = local
+    let mut updated_local_emails: HashMap<jmap::Id, local::Email> = local
         .all_emails_since(notmuch_revision)
         .map_err(|source| Error::IndexLocalUpdatedEmails { source })?
         .into_iter()
@@ -427,6 +427,43 @@ pub fn sync(
         )
         .map_err(|source| Error::Log { source })?;
         stdout.flush().map_err(|source| Error::Log { source })?;
+
+        // For locally-modified emails that have also been updated on the server, pre-compute a
+        // merged set of tags. This preserves local non-mailbox tag changes (keywords, user-added
+        // tags without a corresponding mailbox) while applying server-side mailbox removals, so
+        // that removing a label server-side also removes the corresponding notmuch tag even when
+        // the message has local modifications.
+        let merged_tags_for_local_emails: HashMap<jmap::Id, HashSet<String>> =
+            updated_local_emails
+                .iter()
+                .filter_map(|(id, local_email)| {
+                    remote_emails.get(id).map(|remote_email| {
+                        let server_mailbox_tags: HashSet<&str> = remote_email
+                            .mailbox_ids
+                            .iter()
+                            .filter_map(|mid| mailboxes.mailboxes_by_id.get(mid))
+                            .map(|m| m.tag.as_str())
+                            .collect();
+                        let merged: HashSet<String> = local_email
+                            .tags
+                            .iter()
+                            .filter(|tag| {
+                                // For tags that correspond to a known server mailbox, keep the
+                                // tag only if the server still has this email in that mailbox.
+                                // For all other tags (user-added custom tags, keyword-based tags),
+                                // preserve local state.
+                                if mailboxes.ids_by_tag.contains_key(tag.as_str()) {
+                                    server_mailbox_tags.contains(tag.as_str())
+                                } else {
+                                    true
+                                }
+                            })
+                            .cloned()
+                            .collect();
+                        (id.clone(), merged)
+                    })
+                })
+                .collect();
 
         // Update local messages.
         if !args.dry_run {
@@ -559,6 +596,20 @@ pub fn sync(
                     }
                 }
 
+                // For locally-modified emails that are also in remote_emails, apply the
+                // pre-computed merged tags to notmuch. This removes mailbox tags for labels
+                // the server has removed from the email, without touching local keyword changes.
+                for (id, merged_tags) in &merged_tags_for_local_emails {
+                    let local_email = updated_local_emails
+                        .get(id)
+                        .expect("merged_tags_for_local_emails key must exist in updated_local_emails");
+                    let merged_tags_refs: HashSet<&str> =
+                        merged_tags.iter().map(|s| s.as_str()).collect();
+                    local
+                        .update_email_tags(local_email, merged_tags_refs)
+                        .map_err(|source| Error::UpdateLocalEmail { source })?;
+                }
+
                 // Finally, remove the old messages from the database.
                 for destroyed_local_email in &destroyed_local_emails {
                     local
@@ -617,6 +668,16 @@ pub fn sync(
                         source,
                     }
                 })?;
+            }
+        }
+
+        // Update updated_local_emails with merged tags so that the push step uses the
+        // reconciled tag state rather than the original stale tags.
+        if !args.dry_run {
+            for (id, merged_tags) in &merged_tags_for_local_emails {
+                if let Some(email) = updated_local_emails.get_mut(id) {
+                    email.tags = merged_tags.clone();
+                }
             }
         }
     }
