@@ -662,34 +662,26 @@ impl Remote {
             .map(|(id, mailbox)| (id, mailbox.name.to_lowercase()))
             .collect();
 
-        // Gather the mailbox objects.
-        let mailboxes_by_id: HashMap<Id, Mailbox> = jmap_mailboxes
-            .values()
-            .map(|jmap_mailbox| {
-                if jmap_mailbox.role == Some(MailboxRole::All)
-                    || jmap_mailbox.role == Some(MailboxRole::Archive)
-                    || should_ignore_mailbox_role(&jmap_mailbox.role)
-                {
+        let mailbox_tag = |jmap_mailbox: &jmap::Mailbox| -> Result<Option<String>> {
+            // Determine full path, e.g. root-label/child-label/etc.
+            let mut path_ids = vec![&jmap_mailbox.id];
+            let mut maybe_parent_id = &jmap_mailbox.parent_id;
+            while let Some(parent_id) = maybe_parent_id {
+                // Make sure there isn't a loop.
+                if path_ids.contains(&parent_id) {
+                    Err(Error::InvalidMailboxPath {})?
+                }
+                path_ids.push(parent_id);
+                let parent = jmap_mailboxes
+                    .get(parent_id)
+                    .ok_or(Error::InvalidMailboxPath {})?;
+                if should_ignore_mailbox_role(&parent.role) {
                     return Ok(None);
                 }
-                // Determine full path, e.g. root-label/child-label/etc.
-                let mut path_ids = vec![&jmap_mailbox.id];
-                let mut maybe_parent_id = &jmap_mailbox.parent_id;
-                while let Some(parent_id) = maybe_parent_id {
-                    // Make sure there isn't a loop.
-                    if path_ids.contains(&parent_id) {
-                        Err(Error::InvalidMailboxPath {})?
-                    }
-                    path_ids.push(parent_id);
-                    let parent = jmap_mailboxes
-                        .get(parent_id)
-                        .ok_or(Error::InvalidMailboxPath {})?;
-                    if should_ignore_mailbox_role(&parent.role) {
-                        return Ok(None);
-                    }
-                    maybe_parent_id = &parent.parent_id;
-                }
-                let tag = path_ids
+                maybe_parent_id = &parent.parent_id;
+            }
+            Ok(Some(
+                path_ids
                     .into_iter()
                     .rev()
                     .map(|x| {
@@ -714,7 +706,23 @@ impl Remote {
                                 }
                             })
                     })
-                    .join(&tags_config.directory_separator);
+                    .join(&tags_config.directory_separator),
+            ))
+        };
+
+        // Gather the mailbox objects.
+        let mailboxes_by_id: HashMap<Id, Mailbox> = jmap_mailboxes
+            .values()
+            .map(|jmap_mailbox| {
+                if jmap_mailbox.role == Some(MailboxRole::All)
+                    || jmap_mailbox.role == Some(MailboxRole::Archive)
+                    || should_ignore_mailbox_role(&jmap_mailbox.role)
+                {
+                    return Ok(None);
+                }
+                let Some(tag) = mailbox_tag(jmap_mailbox)? else {
+                    return Ok(None);
+                };
                 Ok(Some((
                     jmap_mailbox.id.clone(),
                     Mailbox::new(jmap_mailbox.id.clone(), tag),
@@ -744,6 +752,10 @@ impl Remote {
             .iter()
             .map(|(id, mailbox)| (mailbox.tag.clone(), id.clone()))
             .collect();
+        let archive_tag = jmap_mailboxes
+            .get(&archive_id)
+            .ok_or(Error::NoArchive {})
+            .and_then(mailbox_tag)?;
 
         let ignored_ids = jmap_mailboxes
             .values()
@@ -753,6 +765,7 @@ impl Remote {
 
         Ok(Mailboxes {
             archive_id,
+            archive_tag,
             mailboxes_by_id,
             ids_by_tag,
             ignored_ids,
@@ -1257,6 +1270,8 @@ pub struct Mailboxes {
     /// The ID of the archive mailbox. Any mail which does not belong to at least one other mailbox
     /// is instead assigned to this mailbox.
     pub archive_id: Id,
+    /// The notmuch tag that maps to the archive mailbox, if it can be represented as a tag path.
+    pub archive_tag: Option<String>,
     /// A map of IDs to their corresponding mailboxes.
     pub mailboxes_by_id: HashMap<Id, Mailbox>,
     /// A map of tags to their corresponding mailboxes.
@@ -1612,6 +1627,7 @@ mod tests {
     fn empty_mailboxes() -> Mailboxes {
         Mailboxes {
             archive_id: jmap::Id("archive".to_string()),
+            archive_tag: None,
             mailboxes_by_id: HashMap::new(),
             ids_by_tag: HashMap::new(),
             ignored_ids: HashSet::new(),
