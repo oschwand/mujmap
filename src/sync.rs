@@ -426,7 +426,10 @@ pub fn sync(
         for (id, email) in &local_emails {
             if !updated_local_emails.contains_key(id)
                 && !destroyed_ids.contains(id)
-                && email.tags.iter().any(|t| custom_keyword_tags.contains(t.as_str()))
+                && email
+                    .tags
+                    .iter()
+                    .any(|t| custom_keyword_tags.contains(t.as_str()))
             {
                 updated_local_emails.insert(id.clone(), email.clone());
             }
@@ -650,6 +653,7 @@ pub fn sync(
     if !args.dry_run {
         // Ensure that for every tag, there exists a corresponding mailbox.
         let builtin_keyword_tags = config.tags.builtin_keyword_tags();
+        let archive_tag = mailboxes.archive_tag.as_deref();
         let tags_with_missing_mailboxes: Vec<String> = local
             .all_tags()
             .map_err(|source| Error::IndexTags { source })?
@@ -660,6 +664,7 @@ pub fn sync(
                 if builtin_keyword_tags.contains(tag)
                     || config.tags.custom_keywords.contains_key(tag)
                     || local::AUTOMATIC_TAGS.contains(tag)
+                    || archive_tag.is_some_and(|archive_tag| archive_tag == tag)
                 {
                     false
                 } else {
