@@ -173,6 +173,12 @@ pub struct LatestState {
     pub notmuch_revision: Option<u64>,
     /// Latest JMAP Email state returned by `Email/get`.
     pub jmap_state: Option<jmap::State>,
+    /// The set of custom keyword tags which were configured as of the last time mujmap was run.
+    /// Used to detect newly added custom keyword mappings so that existing, unmodified emails
+    /// bearing the corresponding notmuch tag can have that tag pushed to the server exactly once,
+    /// without permanently preventing subsequent server-side tag removals from being pulled.
+    #[serde(default)]
+    pub known_custom_keyword_tags: HashSet<String>,
 }
 
 impl LatestState {
@@ -206,6 +212,7 @@ impl LatestState {
         Self {
             notmuch_revision: None,
             jmap_state: None,
+            known_custom_keyword_tags: HashSet::new(),
         }
     }
 }
@@ -411,25 +418,32 @@ pub fn sync(
         .filter(|(id, _)| !destroyed_ids.contains(id))
         .collect();
 
-    // Also include any local email that has a tag mapped to a configured custom keyword but
-    // isn't already queued for update. This ensures that when a custom keyword mapping is
-    // added to the config, existing emails with the corresponding notmuch tag get the JMAP
-    // keyword pushed to the server even though the email itself hasn't changed since the last
-    // sync.
-    if !config.tags.custom_keywords.is_empty() {
-        let custom_keyword_tags: HashSet<&str> = config
-            .tags
-            .custom_keywords
-            .keys()
-            .map(|s| s.as_str())
-            .collect();
+    // Also include any local email that has a tag mapped to a *newly added* configured custom
+    // keyword but isn't already queued for update. This ensures that when a custom keyword
+    // mapping is added to the config, existing emails with the corresponding notmuch tag get the
+    // JMAP keyword pushed to the server even though the email itself hasn't changed since the
+    // last sync.
+    //
+    // We only do this for custom keyword tags which weren't already known as of the last sync
+    // (tracked in `known_custom_keyword_tags`), rather than for *every* configured custom
+    // keyword tag on *every* sync. Otherwise, any email bearing such a tag would be considered
+    // "modified locally" forever, which would permanently prevent server-side changes (including
+    // tag removals) from ever being pulled for that email again.
+    let new_custom_keyword_tags: HashSet<&str> = config
+        .tags
+        .custom_keywords
+        .keys()
+        .map(|s| s.as_str())
+        .filter(|tag| !latest_state.known_custom_keyword_tags.contains(*tag))
+        .collect();
+    if !new_custom_keyword_tags.is_empty() {
         for (id, email) in &local_emails {
             if !updated_local_emails.contains_key(id)
                 && !destroyed_ids.contains(id)
                 && email
                     .tags
                     .iter()
-                    .any(|t| custom_keyword_tags.contains(t.as_str()))
+                    .any(|t| new_custom_keyword_tags.contains(t.as_str()))
             {
                 updated_local_emails.insert(id.clone(), email.clone());
             }
@@ -712,6 +726,7 @@ pub fn sync(
             } else {
                 latest_state.jmap_state
             },
+            known_custom_keyword_tags: config.tags.custom_keywords.keys().cloned().collect(),
         }
         .save(latest_state_filename)?;
     }
